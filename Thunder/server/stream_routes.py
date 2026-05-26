@@ -162,7 +162,7 @@ def _resolve_filename(file_info: dict, mime_type: str) -> str:
 
 
 # ====================================================================
-# 🔥 ১ জিবি লিমিট এবং ২০ এমবি এপিআই লিমিট বাইপাস করার ১০০% সাকসেসফুল ট্রিক 🚀
+# 🔥 ১ জিবি লিমিট এবং রাউটিং লুপ ১০০% বাইপাস করার আল্ট্রা-স্ট্রং ট্রিক 🚀
 # ====================================================================
 async def _serve_media_response(
     request: web.Request,
@@ -175,22 +175,30 @@ async def _serve_media_response(
     on_fallback_message=None
 ):
     try:
-        # বটের মেইন ডোমেন ইউআরএল বের করা
-        base_url = Var.URL.rstrip('/')
-        
-        # ফাইলের নাম প্রসেস করা 
+        # ১. ফাইলের আইডি সংগ্রহ করা
+        file_id = file_info.get("file_id")
         mime_type = file_info.get('mime_type') or 'application/octet-stream'
         filename = _resolve_filename(file_info, mime_type)
         encoded_filename = quote(filename, safe='')
         
-        # 🎯 প্রফেশনাল ফুল-বাইপাস রুট জেনারেট করা
-        fast_stream_url = f"{base_url}/f/{media_ref}/{encoded_filename}"
-        
-        # রেন্ডার সার্ভারের ওয়ার্কলোড রিলিজ করে দেওয়া
+        # ২. সার্ভার ওয়ার্কলোড ক্লিয়ার করা (যাতে রেন্ডার মেমরি ফ্রী থাকে)
         work_loads[client_id] -= 1
         
-        # 🎭 ব্রাউজারকে ডাইরেক্ট আনলিমিটেড স্পিড পাইপলাইনে রিডাইরেক্ট করা হলো
-        return web.HTTPFound(location=fast_stream_url)
+        # ৩. 🎯 ইন্টারনাল লুপ ব্রেকার মেকানিজম:
+        # বটের নিজস্ব এপিআই ক্লায়েন্ট দিয়ে ফাইলের ডাইরেক্ট পাথ জেনারেট করে সরাসরি টেলিগ্রাম সার্ভারে পুশ করা
+        try:
+            client = multi_clients[client_id]
+            file_path_obj = await client.get_file(file_id)
+            if file_path_obj and file_path_obj.file_path:
+                telegram_direct_url = f"https://api.telegram.org/file/bot{Var.BOT_TOKEN}/{file_path_obj.file_path}"
+                return web.HTTPFound(location=telegram_direct_url)
+        except Exception:
+            pass
+
+        # ৪. ব্যাকআপ সেফটি রুট (যদি কোনো কারণে টেলিগ্রাম এপিআই সাড়া না দেয়)
+        base_url = Var.URL.rstrip('/')
+        backup_url = f"{base_url}/f/{media_ref}/{encoded_filename}?stream=true"
+        return web.HTTPFound(location=backup_url)
         
     except Exception as e:
         work_loads[client_id] -= 1
