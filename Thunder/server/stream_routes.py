@@ -108,8 +108,7 @@ def select_optimal_client() -> tuple[int, ByteStreamer]:
 
 
 def get_content_disposition(request: web.Request) -> str:
-    disposition = request.query.get("disposition", "attachment").strip().lower()
-    return disposition if disposition in VALID_DISPOSITIONS else "attachment"
+    return "attachment"
 
 
 def parse_range_header(range_header: str, file_size: int) -> tuple[int, int]:
@@ -162,7 +161,7 @@ def _resolve_filename(file_info: dict, mime_type: str) -> str:
 
 
 # ====================================================================
-# 🔥 ১ জিবি লিমিট এবং রাউটিং লুপ ১০০% বাইপাস করার আল্ট্রা-স্ট্রং ট্রিক 🚀
+# 🔥 ১ জিবি লিমিট বাঁচানোর এবং ডাইরেক্ট ক্রোম ডাউনলোড চালু করার জেনুইন ট্রিক 🚀
 # ====================================================================
 async def _serve_media_response(
     request: web.Request,
@@ -175,35 +174,53 @@ async def _serve_media_response(
     on_fallback_message=None
 ):
     try:
-        # ১. ফাইলের আইডি সংগ্রহ করা
-        file_id = file_info.get("file_id")
+        # ১. ফাইলের বেসিক মেটাডাটা প্রসেস করা
+        file_size = int(file_info.get("file_size", 0))
         mime_type = file_info.get('mime_type') or 'application/octet-stream'
         filename = _resolve_filename(file_info, mime_type)
-        encoded_filename = quote(filename, safe='')
-        
-        # ২. সার্ভার ওয়ার্কলোড ক্লিয়ার করা (যাতে রেন্ডার মেমরি ফ্রী থাকে)
-        work_loads[client_id] -= 1
-        
-        # ৩. 🎯 ইন্টারনাল লুপ ব্রেকার মেকানিজম:
-        # বটের নিজস্ব এপিআই ক্লায়েন্ট দিয়ে ফাইলের ডাইরেক্ট পাথ জেনারেট করে সরাসরি টেলিগ্রাম সার্ভারে পুশ করা
-        try:
-            client = multi_clients[client_id]
-            file_path_obj = await client.get_file(file_id)
-            if file_path_obj and file_path_obj.file_path:
-                telegram_direct_url = f"https://api.telegram.org/file/bot{Var.BOT_TOKEN}/{file_path_obj.file_path}"
-                return web.HTTPFound(location=telegram_direct_url)
-        except Exception:
-            pass
+        encoded_filename = quote(filename)
 
-        # ৪. ব্যাকআপ সেফটি রুট (যদি কোনো কারণে টেলিগ্রাম এপিআই সাড়া না দেয়)
-        base_url = Var.URL.rstrip('/')
-        backup_url = f"{base_url}/f/{media_ref}/{encoded_filename}?stream=true"
-        return web.HTTPFound(location=backup_url)
-        
+        # ২. রেঞ্জ হেডার পার্স করা (ফাস্ট ডাউনলোডের জন্য)
+        range_header = request.headers.get("Range")
+        start, end = parse_range_header(range_header, file_size)
+        length = (end - start) + 1
+
+        # ৩. রেসপন্স হেডার সেট করা (জোর করে attachment পুশ করা যাতে ক্রোম ডাইরেক্ট ডাউনলোড করে)
+        headers = {
+            **CORS_HEADERS,
+            "Content-Type": mime_type,
+            "Content-Length": str(length),
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f'attachment; filename="{encoded_filename}"',
+        }
+
+        # ৪. যদি এটি রেঞ্জ রিকোয়েস্ট হয় (আংশিক ডাটা ডাউনলোড)
+        if range_header:
+            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+            status = 206
+        else:
+            status = 200
+
+        # ৫. অন-রেন্ডার মেমরি সেভার পাইপলাইন জেনারেট করা
+        # এটি অন-রেন্ডারের ১ জিবির মেমরি খরচ না করে ডাটা সরাসরি ব্রাউজারে পাস করে দেয়
+        response = web.StreamResponse(status=status, headers=headers)
+        await response.prepare(request)
+
+        # ৬. সরাসরি ফাইল স্ট্রিম রান করা
+        try:
+            async for chunk in streamer.stream_file(file_info, start, end, fallback_message_id, on_fallback_message):
+                await response.write(chunk)
+        except (web.HTTPException, ConnectionResetError, AssertionError):
+            pass
+        finally:
+            work_loads[client_id] -= 1
+
+        return response
+
     except Exception as e:
         work_loads[client_id] -= 1
-        logger.error(f"ডাইরেক্ট রিডাইরেক্ট ট্রিক এক্সিকিউশনে সমস্যা: {e}", exc_info=True)
-        return web.Response(text=f"Error Generating High-Speed Pipeline: {e}", status=500)
+        logger.error(f"ডাউনলোড স্ট্রিম ইঞ্জিনে সমস্যা: {e}", exc_info=True)
+        return web.Response(text=f"Error In High-Speed Pipeline: {e}", status=500)
 
 
 @routes.get("/", allow_head=True)
