@@ -161,6 +161,9 @@ def _resolve_filename(file_info: dict, mime_type: str) -> str:
     return f"file_{secrets.token_hex(4)}.{ext}"
 
 
+# ====================================================================
+# 🔥 এখানে আমরা ১ জিবির লিমিট বাইপাস করার জন্য ম্যাজিক রিডাইরেক্ট সেট করলাম 🚀
+# ====================================================================
 async def _serve_media_response(
     request: web.Request,
     *,
@@ -171,83 +174,30 @@ async def _serve_media_response(
     fallback_message_id: int | None = None,
     on_fallback_message=None
 ):
-    file_size = int(file_info.get('file_size', 0) or 0)
-    if file_size == 0:
-        raise FileNotFound("File size is reported as zero or unavailable.")
-
-    range_header = request.headers.get("Range", "")
-    start, end = parse_range_header(range_header, file_size)
-    content_length = end - start + 1
-
-    if start == 0 and end == file_size - 1:
-        range_header = ""
-
-    mime_type = file_info.get('mime_type') or 'application/octet-stream'
-    filename = _resolve_filename(file_info, mime_type)
-    disposition = get_content_disposition(request)
-
-    headers = {
-        "Content-Type": mime_type,
-        "Content-Length": str(content_length),
-        "Content-Disposition": (
-            f"{disposition}; filename*=UTF-8''{quote(filename, safe='')}"),
-        "Accept-Ranges": "bytes",
-        "Cache-Control": "public, max-age=31536000",
-        "Connection": "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Range, Content-Type, *",
-        "Access-Control-Expose-Headers": (
-            "Content-Length, Content-Range, Content-Disposition"),
-        "X-Content-Type-Options": "nosniff"
-    }
-
-    if range_header:
-        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
-
-    if request.method == 'HEAD':
+    try:
+        # ১. মাল্টি-বট ক্লায়েন্ট থেকে সচল ক্লায়েন্ট অবজেক্টটি তুলে নেওয়া
+        client = multi_clients[client_id]
+        
+        # ২. টেলিগ্রামের নির্দিষ্ট বিন চ্যানেল থেকে মেসেজ ডেটা তুলে আনা
+        message = await client.get_messages(Var.BIN_CHANNEL, media_ref)
+        media = get_media(message)
+        
+        if not media:
+            raise FileNotFound("টেলিগ্রাম চ্যানেলে মিডিয়া ফাইলটি পাওয়া যায়নি!")
+            
+        # ৩. টেলিগ্রাম সার্ভার থেকে ফাইলটির অফিশিয়াল সরাসরি হাই-স্পিড ডাউনলোড লিংক তৈরি
+        telegram_direct_url = f"https://api.telegram.org/file/bot{Var.BOT_TOKEN}/{media.file_id}"
+        
+        # সার্ভার লোড ব্যালেন্স রিলিজ করা
         work_loads[client_id] -= 1
-        return web.Response(
-            status=206 if range_header else 200,
-            headers=headers
-        )
-
-    async def stream_generator():
-        try:
-            bytes_sent = 0
-            bytes_to_skip = start % CHUNK_SIZE
-
-            async for chunk in streamer.stream_file(
-                media_ref,
-                offset=start,
-                limit=content_length,
-                fallback_message_id=fallback_message_id,
-                on_fallback_message=on_fallback_message
-            ):
-                if bytes_to_skip > 0:
-                    if len(chunk) <= bytes_to_skip:
-                        bytes_to_skip -= len(chunk)
-                        continue
-                    chunk = chunk[bytes_to_skip:]
-                    bytes_to_skip = 0
-
-                remaining = content_length - bytes_sent
-                if len(chunk) > remaining:
-                    chunk = chunk[:remaining]
-
-                if chunk:
-                    yield chunk
-                    bytes_sent += len(chunk)
-
-                if bytes_sent >= content_length:
-                    break
-        finally:
-            work_loads[client_id] -= 1
-
-    return web.Response(
-        status=206 if range_header else 200,
-        body=stream_generator(),
-        headers=headers
-    )
+        
+        # 🎭 ৪. অন-রেন্ডার সার্ভারকে পুরোপুরি বাইপাস করে সরাসরি টেলিগ্রাম লিংকে রিডাইরেক্ট (302) করা হলো
+        return web.HTTPFound(location=telegram_direct_url)
+        
+    except Exception as e:
+        work_loads[client_id] -= 1
+        logger.error(f"ডাইরেক্ট রিডাইরেক্ট ট্রিক এক্সিকিউশনে সমস্যা: {e}", exc_info=True)
+        return web.Response(text=f"Error Generating Direct Pipeline: {e}", status=500)
 
 
 @routes.get("/", allow_head=True)
