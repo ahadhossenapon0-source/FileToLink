@@ -108,6 +108,9 @@ def select_optimal_client() -> tuple[int, ByteStreamer]:
 
 
 def get_content_disposition(request: web.Request) -> str:
+    # যদি লিংকের শেষে ?stream=true থাকে তবে ব্রাউজারে মুভি প্লে হবে, অন্যথায় ডাইরেক্ট ডাউনলোড হবে
+    if request.query.get("stream") == "true":
+        return "inline"
     return "attachment"
 
 
@@ -161,7 +164,7 @@ def _resolve_filename(file_info: dict, mime_type: str) -> str:
 
 
 # ====================================================================
-# 🔥 ১ জিবি লিমিট বাঁচানোর এবং ডাইরেক্ট ক্রোম ডাউনলোড চালু করার জেনুইন ট্রিক 🚀
+# 🔥 অন-রেন্ডার মেমরি সেভার এবং আল্ট্রা-স্পিড ডাউনলোড পাইপলাইন ট্রিক 🚀
 # ====================================================================
 async def _serve_media_response(
     request: web.Request,
@@ -174,41 +177,47 @@ async def _serve_media_response(
     on_fallback_message=None
 ):
     try:
-        # ১. ফাইলের বেসিক মেটাডাটা প্রসেস করা
+        # ১. ফাইলের বেসিক ডাটা প্রসেস করা
         file_size = int(file_info.get("file_size", 0))
         mime_type = file_info.get('mime_type') or 'application/octet-stream'
         filename = _resolve_filename(file_info, mime_type)
         encoded_filename = quote(filename)
 
-        # ২. রেঞ্জ হেডার পার্স করা (ফাস্ট ডাউনলোডের জন্য)
+        # ২. রেঞ্জ হেডার হ্যান্ডেল করা (টেনে টেনে দেখার বা ফাস্ট ডাউনলোডের জন্য)
         range_header = request.headers.get("Range")
         start, end = parse_range_header(range_header, file_size)
         length = (end - start) + 1
 
-        # ৩. রেসপন্স হেডার সেট করা (জোর করে attachment পুশ করা যাতে ক্রোম ডাইরেক্ট ডাউনলোড করে)
+        # ৩. ডাইরেক্ট ডাউনলোড নাকি প্লে হবে তা নির্ধারণ করা
+        disposition = get_content_disposition(request)
+
+        # ৪. টাইমআউট এবং চঙ্ক লকিং বাইপাস করার জন্য হাই-স্পিড হেডার সেটআপ
         headers = {
             **CORS_HEADERS,
             "Content-Type": mime_type,
             "Content-Length": str(length),
             "Accept-Ranges": "bytes",
-            "Content-Disposition": f'attachment; filename="{encoded_filename}"',
+            "Content-Disposition": f'{disposition}; filename="{encoded_filename}"',
+            "Connection": "keep-alive",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
         }
 
-        # ৪. যদি এটি রেঞ্জ রিকোয়েস্ট হয় (আংশিক ডাটা ডাউনলোড)
         if range_header:
             headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
             status = 206
         else:
             status = 200
 
-        # ৫. অন-রেন্ডার মেমরি সেভার পাইপলাইন জেনারেট করা
-        # এটি অন-রেন্ডারের ১ জিবির মেমরি খরচ না করে ডাটা সরাসরি ব্রাউজারে পাস করে দেয়
+        # ৫. স্ট্রিম রেসপন্স প্রিপেয়ার (ডাটা মেমরিতে লক না করে সরাসরি ইউজারের কাছে পাস হবে)
         response = web.StreamResponse(status=status, headers=headers)
         await response.prepare(request)
 
-        # ৬. সরাসরি ফাইল স্ট্রিম রান করা
+        # ৬. সরাসরি ফাইল স্ট্রিম রাইটিং শুরু
         try:
             async for chunk in streamer.stream_file(file_info, start, end, fallback_message_id, on_fallback_message):
+                if not chunk:
+                    continue
                 await response.write(chunk)
         except (web.HTTPException, ConnectionResetError, AssertionError):
             pass
