@@ -178,19 +178,18 @@ async def _serve_media_response(
         # বটের মেইন ডোমেন ইউআরএল বের করা
         base_url = Var.URL.rstrip('/')
         
-        # ফাইল নেম প্রসেস করা (ডাউনলোডের সময় আসল নাম শো করার জন্য)
+        # ফাইলের নাম প্রসেস করা 
         mime_type = file_info.get('mime_type') or 'application/octet-stream'
         filename = _resolve_filename(file_info, mime_type)
         encoded_filename = quote(filename, safe='')
         
-        # 🎯 বটের ইন্টারনাল ডাইরেক্ট ডাউনলোড গেটওয়ে দিয়ে লিংক জেনারেট করা
-        # এতে অন-রেন্ডার নিজে ডাটা টানবে না এবং ৪MD (404) এররও আসবে না
-        fast_stream_url = f"{base_url}/{media_ref}/{encoded_filename}"
+        # 🎯 প্রফেশনাল ফুল-বাইপাস রুট জেনারেট করা
+        fast_stream_url = f"{base_url}/f/{media_ref}/{encoded_filename}"
         
-        # সার্ভার ওয়ার্কলোড রিলিজ করে দেওয়া
+        # রেন্ডার সার্ভারের ওয়ার্কলোড রিলিজ করে দেওয়া
         work_loads[client_id] -= 1
         
-        # 🎭 ব্রাউজারকে ডাইরেক্ট আনলিমিটেড স্পিড পাইপলাইনে রিডাইরেক্ট (302) করা হলো
+        # 🎭 ব্রাউজারকে ডাইরেক্ট আনলিমিটেড স্পিড পাইপলাইনে রিডাইরেক্ট করা হলো
         return web.HTTPFound(location=fast_stream_url)
         
     except Exception as e:
@@ -229,22 +228,6 @@ async def status_endpoint(request):
         },
         headers={"Access-Control-Allow-Origin": "*"}
     )
-
-
-@routes.options("/status")
-async def status_options(request: web.Request):
-    return web.Response(headers={
-        **CORS_HEADERS,
-        "Access-Control-Max-Age": "86400"
-    })
-
-
-@routes.options(r"/{path:.+}")
-async def media_options(request: web.Request):
-    return web.Response(headers={
-        **CORS_HEADERS,
-        "Access-Control-Max-Age": "86400"
-    })
 
 
 @routes.get(r"/watch/f/{secure_hash}/{name:.+}", allow_head=True)
@@ -378,7 +361,6 @@ async def media_delivery(request: web.Request):
         message_id, secure_hash = parse_media_request(path, request.query)
 
         client_id, streamer = select_optimal_client()
-
         work_loads[client_id] += 1
 
         try:
